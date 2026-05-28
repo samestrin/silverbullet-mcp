@@ -7,6 +7,7 @@ import { getCachedNoteContent } from './cache.js';
 import { escapeReplacementText } from './replacement-utils.js';
 import { appendToNote } from './append-utils.js';
 import { getFrontmatterValue, setFrontmatterValue } from './frontmatter-utils.js';
+import { extractLinks, findBacklinks } from './link-utils.js';
 import type { SearchResult, SearchMatch, NoteInfo } from './types.js';
 import {
     NoteErrorHandler,
@@ -945,6 +946,91 @@ export function configureMcpServerInstance(server: McpServer): void {
                         {
                             type: 'text',
                             text: `Failed to set frontmatter: ${error instanceof Error ? error.message : 'Unknown error'}`,
+                        },
+                    ],
+                    isError: true,
+                };
+            }
+        }
+    );
+
+    // Tool: query outgoing links from a note
+    server.registerTool(
+        'query-links',
+        {
+            title: 'Query Links',
+            description: 'Extract all outgoing wiki links from a note. Returns link targets, anchors, and aliases.',
+            inputSchema: {
+                filename: z
+                    .string()
+                    .describe('The filename of the note (should end with .md)'),
+            },
+        },
+        async ({ filename }) => {
+            try {
+                const content = await readNoteAPI(filename as string);
+                const links = extractLinks(content);
+
+                return {
+                    content: [
+                        {
+                            type: 'text',
+                            text: JSON.stringify({
+                                filename,
+                                linkCount: links.length,
+                                links,
+                            }, null, 2),
+                        },
+                    ],
+                };
+            } catch (error) {
+                return {
+                    content: [
+                        {
+                            type: 'text',
+                            text: `Failed to query links: ${error instanceof Error ? error.message : 'Unknown error'}`,
+                        },
+                    ],
+                    isError: true,
+                };
+            }
+        }
+    );
+
+    // Tool: query backlinks to a note
+    server.registerTool(
+        'query-backlinks',
+        {
+            title: 'Query Backlinks',
+            description: 'Find all notes that link to a specified note (backlinks).',
+            inputSchema: {
+                filename: z
+                    .string()
+                    .describe('The filename of the note to find backlinks for (should end with .md)'),
+            },
+        },
+        async ({ filename }) => {
+            try {
+                const backlinks = await findBacklinks(filename as string);
+
+                return {
+                    content: [
+                        {
+                            type: 'text',
+                            text: JSON.stringify({
+                                filename,
+                                backlinkCount: backlinks.length,
+                                backlinks,
+                            }, null, 2),
+                        },
+                    ],
+                };
+            } catch (error) {
+                return {
+                    content: [
+                        {
+                            type: 'text',
+                            text: `Failed to query backlinks: ${error instanceof Error ? error.message : 'Unknown error'}`,
                         },
                     ],
                     isError: true,
