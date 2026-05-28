@@ -5,6 +5,7 @@ import { z } from 'zod';
 import { listNotesAPI, readNoteAPI, writeNoteAPI, deleteNoteAPI } from './silverbullet-api.js';
 import { getCachedNoteContent } from './cache.js';
 import { escapeReplacementText } from './replacement-utils.js';
+import { appendToNote } from './append-utils.js';
 import type { SearchResult, SearchMatch, NoteInfo } from './types.js';
 import {
     NoteErrorHandler,
@@ -813,6 +814,49 @@ export function configureMcpServerInstance(server: McpServer): void {
                     isError: true,
                 };
             }
+        }
+    );
+
+    // Tool: append content to a note
+    server.registerTool(
+        'append-note',
+        {
+            title: 'Append to Note',
+            description: 'Append content to the end of an existing note, or create a new note with the content',
+            inputSchema: {
+                filename: z
+                    .string()
+                    .describe('The filename of the note to append to (should end with .md)'),
+                content: z
+                    .string()
+                    .describe('The content to append to the note'),
+                separator: z
+                    .string()
+                    .optional()
+                    .default('\n\n')
+                    .describe('Separator between existing content and new content (default: two newlines)'),
+                createIfMissing: z
+                    .boolean()
+                    .optional()
+                    .default(true)
+                    .describe('Create the note if it does not exist (default: true)'),
+            },
+        },
+        async ({ filename, content, separator, createIfMissing }) => {
+            const result = await appendToNote(filename, content, {
+                separator,
+                createIfMissing,
+            });
+
+            return {
+                content: [
+                    {
+                        type: 'text',
+                        text: result.message,
+                    },
+                ],
+                isError: !result.success,
+            };
         }
     );
 }
