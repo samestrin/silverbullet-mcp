@@ -6,6 +6,7 @@ import { listNotesAPI, readNoteAPI, writeNoteAPI, deleteNoteAPI } from './silver
 import { getCachedNoteContent } from './cache.js';
 import { escapeReplacementText } from './replacement-utils.js';
 import { appendToNote } from './append-utils.js';
+import { getFrontmatterValue, setFrontmatterValue } from './frontmatter-utils.js';
 import type { SearchResult, SearchMatch, NoteInfo } from './types.js';
 import {
     NoteErrorHandler,
@@ -857,6 +858,98 @@ export function configureMcpServerInstance(server: McpServer): void {
                 ],
                 isError: !result.success,
             };
+        }
+    );
+
+    // Tool: get frontmatter value from a note
+    server.registerTool(
+        'frontmatter-get',
+        {
+            title: 'Get Frontmatter',
+            description: 'Get YAML frontmatter from a note. Returns entire frontmatter object or a specific field using dot notation.',
+            annotations: {
+                readOnlyHint: true,
+            },
+            inputSchema: {
+                filename: z
+                    .string()
+                    .describe('The filename of the note (should end with .md)'),
+                key: z
+                    .string()
+                    .optional()
+                    .describe('Optional key to retrieve (supports dot notation like "meta.author"). If omitted, returns entire frontmatter.'),
+            },
+        },
+        async ({ filename, key }) => {
+            try {
+                const content = await readNoteAPI(filename as string);
+                const value = getFrontmatterValue(content, key as string | undefined);
+
+                return {
+                    content: [
+                        {
+                            type: 'text',
+                            text: JSON.stringify(value, null, 2),
+                        },
+                    ],
+                };
+            } catch (error) {
+                return {
+                    content: [
+                        {
+                            type: 'text',
+                            text: `Failed to get frontmatter: ${error instanceof Error ? error.message : 'Unknown error'}`,
+                        },
+                    ],
+                    isError: true,
+                };
+            }
+        }
+    );
+
+    // Tool: set frontmatter value in a note
+    server.registerTool(
+        'frontmatter-set',
+        {
+            title: 'Set Frontmatter',
+            description: 'Set a YAML frontmatter field in a note. Creates frontmatter if none exists. Supports dot notation for nested fields.',
+            inputSchema: {
+                filename: z
+                    .string()
+                    .describe('The filename of the note (should end with .md)'),
+                key: z
+                    .string()
+                    .describe('The key to set (supports dot notation like "meta.author")'),
+                value: z
+                    .unknown()
+                    .describe('The value to set (can be string, number, boolean, array, or object)'),
+            },
+        },
+        async ({ filename, key, value }) => {
+            try {
+                const content = await readNoteAPI(filename as string);
+                const newContent = setFrontmatterValue(content, key as string, value);
+                await writeNoteAPI(filename as string, newContent);
+
+                return {
+                    content: [
+                        {
+                            type: 'text',
+                            text: `Successfully set ${key} in ${filename}`,
+                        },
+                    ],
+                };
+            } catch (error) {
+                return {
+                    content: [
+                        {
+                            type: 'text',
+                            text: `Failed to set frontmatter: ${error instanceof Error ? error.message : 'Unknown error'}`,
+                        },
+                    ],
+                    isError: true,
+                };
+            }
         }
     );
 }
