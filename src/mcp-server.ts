@@ -451,9 +451,13 @@ export function configureMcpServerInstance(server: McpServer): void {
                             lines.forEach((line, lineIndex) => {
                                 const lineMatches = Array.from(line.matchAll(searchRegex));
                                 if (lineMatches.length > 0) {
-                                    // Get context lines only if not in concise mode or if contextLines > 0
+                                    // Collect context whenever the caller asked for it.
+                                    // `concise` controls output DENSITY, not whether a requested
+                                    // parameter is honoured. Gating collection on it silently
+                                    // discarded contextLines in the default mode, so a caller who
+                                    // passed contextLines: 10 got zero context and no warning.
                                     let contextText = '';
-                                    if (!concise && contextLines > 0) {
+                                    if (contextLines > 0) {
                                         const startLine = Math.max(0, lineIndex - contextLines);
                                         const endLine = Math.min(lines.length - 1, lineIndex + contextLines);
                                         contextText = lines.slice(startLine, endLine + 1).join('\n');
@@ -555,6 +559,16 @@ export function configureMcpServerInstance(server: McpServer): void {
                                         ? match.content.substring(0, 97) + '...'
                                         : match.content;
                                 output += `  • L${match.line}: ${truncatedContent}\n`;
+                                if (contextLines > 0 && match.context) {
+                                    match.context
+                                        .split('\n')
+                                        .forEach((ctxLine: string, idx: number) => {
+                                            const actualLineNum = (match.startLine || 0) + idx;
+                                            // the match line is already printed above
+                                            if (actualLineNum === match.line) return;
+                                            output += `      ${actualLineNum}: ${ctxLine}\n`;
+                                        });
+                                }
                             }
                         });
 
