@@ -84,7 +84,8 @@ export function createRuntimeClient(baseUrl: string, authToken?: string): Runtim
             });
         } catch (e) {
             const name = e instanceof Error ? e.name : '';
-            const kind = name === 'TimeoutError' || name === 'AbortError' ? 'timeout' : 'unavailable';
+            const kind: 'timeout' | 'unavailable' =
+                name === 'TimeoutError' || name === 'AbortError' ? 'timeout' : 'unavailable';
             return { ok: false as const, kind, error: e instanceof Error ? e.message : String(e) };
         }
         const text = await res.text();

@@ -24,7 +24,9 @@ function makeCtx({
     searchError,
 }: {
     files?: Record<string, string | { content: string; lastModified: number }>;
-    probeResult?: { ok: boolean; caps?: { basicSearch?: boolean; silversearch?: boolean } } | { ok: false; error?: string };
+    probeResult?:
+        | { ok: true; caps?: { basicSearch: boolean; silversearch: boolean } }
+        | { ok: false; error?: string };
     searchResults?: { file: string; score: number }[];
     searchError?: string;
 } = {}): { ctx: SearchContext; runtimeCalls: string[]; reads: string[] } {
@@ -35,7 +37,7 @@ function makeCtx({
         perm: 'rw' as const,
         lastModified: typeof v === 'string' ? 0 : v.lastModified,
     }));
-    const capsStore: { caps: unknown | null } = { caps: null };
+    const capsStore: { caps: { available: boolean; engine?: string } | null } = { caps: null };
 
     const ctx: SearchContext = {
         listNotes: async () => listing.map((f) => ({ ...f })),
@@ -58,7 +60,7 @@ function makeCtx({
         },
         caps: {
             get: () => capsStore.caps,
-            save: (c: unknown) => {
+            save: (c: { available: boolean; engine?: string }) => {
                 capsStore.caps = c;
             },
             clear: () => {
@@ -79,7 +81,7 @@ describe('AC1: hybrid index path', () => {
     it('uses the index and fetches only matching notes for line extraction', async () => {
         const { ctx, reads } = makeCtx({
             files: FILES,
-            probeResult: { ok: true, caps: { basicSearch: true } },
+            probeResult: { ok: true, caps: { basicSearch: true, silversearch: false } },
             searchResults: [{ file: 'alpha.md', score: 7 }],
         });
         const out = await hybridSearch({
@@ -101,7 +103,7 @@ describe('AC1: hybrid index path', () => {
     it('respects pagination: only page-2 notes are fetched', async () => {
         const { ctx, reads } = makeCtx({
             files: FILES,
-            probeResult: { ok: true, caps: { basicSearch: true } },
+            probeResult: { ok: true, caps: { basicSearch: true, silversearch: false } },
             searchResults: [
                 { file: 'alpha.md', score: 3 },
                 { file: 'beta.md', score: 2 },
@@ -123,7 +125,7 @@ describe('AC1: hybrid index path', () => {
     it('filters Library/ and non-markdown files out of index results', async () => {
         const { ctx } = makeCtx({
             files: FILES,
-            probeResult: { ok: true, caps: { basicSearch: true } },
+            probeResult: { ok: true, caps: { basicSearch: true, silversearch: false } },
             searchResults: [
                 { file: 'Library/Std/Search.md', score: 9 },
                 { file: 'image.png', score: 8 },
@@ -138,7 +140,7 @@ describe('AC1: hybrid index path', () => {
     it('includes context lines in non-concise mode like the scan path', async () => {
         const { ctx } = makeCtx({
             files: FILES,
-            probeResult: { ok: true, caps: { basicSearch: true } },
+            probeResult: { ok: true, caps: { basicSearch: true, silversearch: false } },
             searchResults: [{ file: 'alpha.md', score: 1 }],
         });
         const out = await hybridSearch({
@@ -157,7 +159,7 @@ describe('AC2: zero-result validation', () => {
     it('falls back to scan when the index is wrong about zero results', async () => {
         const { ctx } = makeCtx({
             files: FILES,
-            probeResult: { ok: true, caps: { basicSearch: true } },
+            probeResult: { ok: true, caps: { basicSearch: true, silversearch: false } },
             searchResults: [],
         });
         const out = await hybridSearch({ ctx, query: 'keyword', searchType: 'content' });
@@ -169,7 +171,7 @@ describe('AC2: zero-result validation', () => {
     it('trusts a zero result when the term is genuinely absent', async () => {
         const { ctx } = makeCtx({
             files: FILES,
-            probeResult: { ok: true, caps: { basicSearch: true } },
+            probeResult: { ok: true, caps: { basicSearch: true, silversearch: false } },
             searchResults: [],
         });
         const out = await hybridSearch({ ctx, query: 'zzznotfound', searchType: 'content' });
@@ -184,7 +186,7 @@ describe('AC2: zero-result validation', () => {
                 'recent.md': { content: 'boring\n', lastModified: 999 },
                 'ancient.md': { content: 'xylophone deep in history\n', lastModified: 1 },
             },
-            probeResult: { ok: true, caps: { basicSearch: true } },
+            probeResult: { ok: true, caps: { basicSearch: true, silversearch: false } },
             searchResults: [],
         });
         const out = await hybridSearch({ ctx, query: 'xylophone', searchType: 'content' });
@@ -207,7 +209,7 @@ describe('AC3: graceful fallback and caching', () => {
     it('uses a cached positive verdict without re-probing', async () => {
         const { ctx, runtimeCalls } = makeCtx({
             files: FILES,
-            probeResult: { ok: true, caps: { basicSearch: true } },
+            probeResult: { ok: true, caps: { basicSearch: true, silversearch: false } },
             searchResults: [{ file: 'alpha.md', score: 1 }],
         });
         ctx.caps.save({ available: true, engine: 'basic' });
@@ -219,7 +221,7 @@ describe('AC3: graceful fallback and caching', () => {
     it('invalidates the cached verdict when the index search fails, then falls back', async () => {
         const { ctx } = makeCtx({
             files: FILES,
-            probeResult: { ok: true, caps: { basicSearch: true } },
+            probeResult: { ok: true, caps: { basicSearch: true, silversearch: false } },
             searchError: 'index corrupted',
         });
         const out = await hybridSearch({ ctx, query: 'keyword', searchType: 'content' });
@@ -233,7 +235,7 @@ describe('AC4: mode selection', () => {
     it("mode 'scan' never contacts the runtime", async () => {
         const { ctx, runtimeCalls } = makeCtx({
             files: FILES,
-            probeResult: { ok: true, caps: { basicSearch: true } },
+            probeResult: { ok: true, caps: { basicSearch: true, silversearch: false } },
         });
         const out = await hybridSearch({ ctx, query: 'keyword', searchType: 'content', mode: 'scan' });
         expect(out.source).toBe('scan');
@@ -260,7 +262,7 @@ describe('AC4: mode selection', () => {
     it("searchType 'title' always scans", async () => {
         const { ctx, runtimeCalls } = makeCtx({
             files: FILES,
-            probeResult: { ok: true, caps: { basicSearch: true } },
+            probeResult: { ok: true, caps: { basicSearch: true, silversearch: false } },
         });
         const out = await hybridSearch({ ctx, query: 'alpha', searchType: 'title' });
         expect(out.source).toBe('scan');
