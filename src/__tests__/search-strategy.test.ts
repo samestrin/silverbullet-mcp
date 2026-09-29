@@ -297,3 +297,41 @@ describe('scan parity', () => {
 beforeEach(() => {
     vi.restoreAllMocks();
 });
+
+describe('branch coverage: unusual verdicts and validation failures', () => {
+    it('re-probes when a cached positive verdict lacks an engine', async () => {
+        const { ctx, runtimeCalls } = makeCtx({
+            files: FILES,
+            probeResult: { ok: true, caps: { basicSearch: true, silversearch: false } },
+            searchResults: [{ file: 'alpha.md', score: 1 }],
+        });
+        ctx.caps.save({ available: true }); // no engine → stale/malformed verdict
+        const out = await hybridSearch({ ctx, query: 'keyword', searchType: 'content' });
+        expect(out.source).toBe('index');
+        expect(runtimeCalls).toEqual(['probe', 'search']);
+    });
+
+    it('treats a listing failure during zero-validation as untrustworthy... but still scans', async () => {
+        const { ctx } = makeCtx({
+            files: FILES,
+            probeResult: { ok: true, caps: { basicSearch: true, silversearch: false } },
+            searchResults: [],
+        });
+        ctx.listNotes = async () => {
+            throw new Error('listing failed');
+        };
+        const out = await hybridSearch({ ctx, query: 'keyword', searchType: 'content' });
+        // Validation can't run (listing failed) → the zero is trusted, per the
+        // documented trade-off: without a listing there is no way to check.
+        expect(out.source).toBe('index');
+        expect(out.notice).toBeUndefined();
+    });
+
+    it('mode index with a cached negative verdict throws', async () => {
+        const { ctx } = makeCtx({ files: FILES });
+        ctx.caps.save({ available: false });
+        await expect(
+            hybridSearch({ ctx, query: 'keyword', searchType: 'content', mode: 'index' })
+        ).rejects.toThrow(/cached verdict/i);
+    });
+});

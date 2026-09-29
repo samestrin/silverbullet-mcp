@@ -27,6 +27,7 @@ vi.mock('../runtime-client.js', () => ({
 import * as api from '../silverbullet-api.js';
 import * as cache from '../cache.js';
 import { createRuntimeClient } from '../runtime-client.js';
+import { resetCapsCache } from '../caps-store.js';
 import { configureMcpServerInstance } from '../mcp-server.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 
@@ -64,6 +65,7 @@ const mockRuntime = {
 
 beforeEach(() => {
     vi.clearAllMocks();
+    resetCapsCache();
     vi.mocked(createRuntimeClient).mockReturnValue(mockRuntime as never);
 });
 
@@ -179,19 +181,21 @@ describe('search-notes: existing behavior preserved (AC5)', () => {
             { name: 'b.md', perm: 'rw' },
         ] as never);
         vi.mocked(cache.getCachedNoteContent).mockImplementation(async (filename: unknown) =>
-            filename === 'a.md' ? 'hit\n' : 'hit\n'
+            filename === 'a.md' ? 'hit\nnext\n' : 'hit\nnext\n'
         );
         const res = await captureTool('search-notes')({ ...baseArgs, query: 'hit' });
         const text = res.content[0].text;
         expect(text).toBe(
             'SEARCH: "hit" | Results: 2 notes, 2 matches | Page 1/1 | via full scan\n\n' +
-                '1. a.md (1x)\n  • L1: hit\n\n' +
-                '2. b.md (1x)\n  • L1: hit\n\n'
+                '1. a.md (1x)\n  • L1: hit\n      2: next\n\n' +
+                '2. b.md (1x)\n  • L1: hit\n      2: next\n\n'
         );
     });
 
-    it('regex invalid fallback warning is preserved', async () => {
-        const res = await captureTool('search-notes')({ ...baseArgs, query: '(invalid' });
-        expect(res.content[0].text).toContain('Warning: Your regex query "(invalid" was invalid');
+    it('regex invalid fallback warning is preserved when results exist', async () => {
+        vi.mocked(cache.getCachedNoteContent).mockResolvedValue('a** pattern here\n');
+        const res = await captureTool('search-notes')({ ...baseArgs, query: 'a**' });
+        expect(res.content[0].text).toContain('Warning: Your regex query "a**" was invalid');
+        expect(res.content[0].text).toContain('a** pattern here');
     });
 });

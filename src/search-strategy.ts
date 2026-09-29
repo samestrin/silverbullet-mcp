@@ -23,6 +23,8 @@ export interface NoteMatches {
     content: string;
     context?: string;
     matchCount: number;
+    startLine?: number;
+    endLine?: number;
 }
 
 export interface SearchResult {
@@ -40,8 +42,16 @@ export interface HybridSearchOutcome {
     /** Results for the requested page only. */
     results: SearchResult[];
     totalResults: number;
+    /**
+     * Total match count. On the scan path this covers ALL results; on the
+     * index path only the current page's notes were read, so it covers the
+     * page window only.
+     */
+    totalMatches: number;
     totalPages: number;
     page: number;
+    /** 0-based index of the first result on this page (for numbering). */
+    startIndex: number;
 }
 
 export interface CapsStore {
@@ -107,6 +117,9 @@ function finish(opts: {
     totalOverride?: number;
 }): HybridSearchOutcome {
     const totalResults = opts.totalOverride ?? opts.results.length;
+    // For scans, results holds ALL matches (total across the space); for the
+    // index path only the current page's notes were read.
+    const totalMatches = opts.results.reduce((s, r) => s + r.score, 0);
     const totalPages = Math.max(1, Math.ceil(totalResults / opts.maxResults));
     const start = (opts.page - 1) * opts.maxResults;
     // When totalOverride is set the results are already the current page's
@@ -119,8 +132,10 @@ function finish(opts: {
         source: opts.source,
         results: paged,
         totalResults,
+        totalMatches,
         totalPages,
         page: opts.page,
+        startIndex: start,
     };
 }
 
@@ -163,7 +178,7 @@ async function scanSearch(opts: {
                     const lineMatches = Array.from(line.matchAll(regex));
                     if (lineMatches.length > 0) {
                         let contextText = '';
-                        if (!concise && contextLines > 0) {
+                        if (contextLines > 0) {
                             const startLine = Math.max(0, lineIndex - contextLines);
                             const endLine = Math.min(lines.length - 1, lineIndex + contextLines);
                             contextText = lines.slice(startLine, endLine + 1).join('\n');
@@ -174,6 +189,14 @@ async function scanSearch(opts: {
                             content: line.trim(),
                             context: contextText,
                             matchCount: lineMatches.length,
+                            startLine:
+                                contextLines > 0
+                                    ? Math.max(0, lineIndex - contextLines) + 1
+                                    : undefined,
+                            endLine:
+                                contextLines > 0
+                                    ? Math.min(lines.length - 1, lineIndex + contextLines) + 1
+                                    : undefined,
                         });
                     }
                 });
@@ -233,7 +256,7 @@ async function extractLines(opts: {
                     const lineMatches = Array.from(line.matchAll(lineRegex));
                     if (lineMatches.length > 0) {
                         let contextText = '';
-                        if (!concise && contextLines > 0) {
+                        if (contextLines > 0) {
                             const startLine = Math.max(0, lineIndex - contextLines);
                             const endLine = Math.min(lines.length - 1, lineIndex + contextLines);
                             contextText = lines.slice(startLine, endLine + 1).join('\n');
@@ -244,6 +267,14 @@ async function extractLines(opts: {
                             content: line.trim(),
                             context: contextText,
                             matchCount: lineMatches.length,
+                            startLine:
+                                contextLines > 0
+                                    ? Math.max(0, lineIndex - contextLines) + 1
+                                    : undefined,
+                            endLine:
+                                contextLines > 0
+                                    ? Math.min(lines.length - 1, lineIndex + contextLines) + 1
+                                    : undefined,
                         });
                     }
                 });
