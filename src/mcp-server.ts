@@ -4,6 +4,21 @@ import { McpServer, ResourceTemplate } from '@modelcontextprotocol/sdk/server/mc
 import { z } from 'zod';
 import { listNotesAPI, readNoteAPI, writeNoteAPI, deleteNoteAPI } from './silverbullet-api.js';
 import { getCachedNoteContent } from './cache.js';
+import { hybridSearch, type SearchContext } from './search-strategy.js';
+import { createRuntimeClient } from './runtime-client.js';
+import { loadCaps, saveCaps, clearCaps } from './caps-store.js';
+
+let runtimeClientSingleton: ReturnType<typeof createRuntimeClient> | null = null;
+function getRuntimeClient() {
+    if (!runtimeClientSingleton) {
+        runtimeClientSingleton = createRuntimeClient(SB_API_BASE_URL, SB_AUTH_TOKEN);
+    }
+    return runtimeClientSingleton;
+}
+import { escapeReplacementText } from './replacement-utils.js';
+import { appendToNote } from './append-utils.js';
+import { getFrontmatterValue, setFrontmatterValue } from './frontmatter-utils.js';
+import { extractLinks, findBacklinks } from './link-utils.js';
 import type { SearchResult, SearchMatch, NoteInfo } from './types.js';
 import {
     NoteErrorHandler,
@@ -12,21 +27,21 @@ import {
     type MultiNoteRequest
 } from './note-utils.js';
 import { URL } from 'node:url';
+import { SB_API_BASE_URL, SB_AUTH_TOKEN } from './config.js';
 
 export function configureMcpServerInstance(server: McpServer): void {
     // Resource: read a single note or list all notes
     server.registerResource(
         'note',
         new ResourceTemplate('sb-note://{filename}', {
+            // Return an empty resource list.  The full vault (2,500+ notes) is
+            // far too large to enumerate via resources/list on every client
+            // connect — it produces a multi-MB payload through the SSE/stdio
+            // transport.  Clients should use the 'list-notes' tool for
+            // discovery instead.  The resource template still works for
+            // reading individual notes by URI.
             list: async () => {
-                const notesData = await listNotesAPI();
-                const result = {
-                    resources: notesData.map((n) => ({
-                        uri: `sb-note://${encodeURIComponent(n.name)}`,
-                        name: n.name,
-                    })),
-                };
-                return result;
+                return { resources: [] };
             },
         }),
         {
@@ -250,7 +265,10 @@ export function configureMcpServerInstance(server: McpServer): void {
                 }
 
                 // Perform replacement
-                const newContent = content.replace(searchRegex, replaceText);
+                // Escape $ in replacement text to prevent JS String.replace() special sequences
+                // ($&, $', $`, $1-$9) from causing unintended behavior or file corruption
+                const safeReplaceText = escapeReplacementText(replaceText);
+                const newContent = content.replace(searchRegex, safeReplaceText);
                 
                 // Write back the modified content
                 await writeNoteAPI(filename, newContent);
@@ -400,102 +418,46 @@ export function configureMcpServerInstance(server: McpServer): void {
             enableCaching,
         }) => {
             try {
-                const notes = await listNotesAPI();
-                const searchResults = [];
+                // Regex-invalid warning: purely presentational, computed here so
+                // the strategy module stays formatting-free.
                 const flags = caseSensitive ? 'g' : 'gi';
-                let searchRegex;
                 let regexInvalidFallback = false;
-
                 try {
-                    searchRegex = new RegExp(query, flags);
-                } catch (error) {
-                    // If regex is invalid, escape special characters and treat as literal
-                    const escapedQuery = query.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&');
-                    searchRegex = new RegExp(escapedQuery, flags);
+                    new RegExp(query, flags);
+                } catch {
                     regexInvalidFallback = true;
                 }
 
-                for (const note of notes) {
-                    const noteResults: SearchResult = {
-                        filename: note.name,
-                        permission: note.perm,
-                        matches: [],
-                        score: 0,
-                    };
+                // Hybrid search: full-text index (Runtime API + search library)
+                // when available, full scan otherwise. Zero index results are
+                // validated against the notes so a stale index can't hide matches.
+                const ctx: SearchContext = {
+                    listNotes: listNotesAPI,
+                    readNote: (filename: string) => getCachedNoteContent(filename, enableCaching),
+                    runtime: getRuntimeClient(),
+                    caps: {
+                        get: () => loadCaps(SB_API_BASE_URL),
+                        save: (c: { available: boolean; engine?: string }) => saveCaps(SB_API_BASE_URL, c),
+                        clear: () => clearCaps(SB_API_BASE_URL),
+                    },
+                };
+                const outcome = await hybridSearch({
+                    ctx,
+                    query,
+                    searchType,
+                    caseSensitive,
+                    maxResults,
+                    page,
+                    concise,
+                    contextLines,
+                });
 
-                    // Search in title/filename
-                    if (searchType === 'title' || searchType === 'both') {
-                        const titleMatches = Array.from(note.name.matchAll(searchRegex));
-                        if (titleMatches.length > 0) {
-                            noteResults.matches.push({
-                                type: 'title',
-                                line: 0,
-                                content: note.name,
-                                matchCount: titleMatches.length,
-                            });
-                        }
-                    }
-
-                    // Search in content
-                    if (searchType === 'content' || searchType === 'both') {
-                        try {
-                            const content = await getCachedNoteContent(note.name, enableCaching);
-                            const lines = content.split('\n');
-
-                            lines.forEach((line, lineIndex) => {
-                                const lineMatches = Array.from(line.matchAll(searchRegex));
-                                if (lineMatches.length > 0) {
-                                    // Get context lines only if not in concise mode or if contextLines > 0
-                                    let contextText = '';
-                                    if (!concise && contextLines > 0) {
-                                        const startLine = Math.max(0, lineIndex - contextLines);
-                                        const endLine = Math.min(lines.length - 1, lineIndex + contextLines);
-                                        contextText = lines.slice(startLine, endLine + 1).join('\n');
-                                    }
-
-                                    noteResults.matches.push({
-                                        type: 'content',
-                                        line: lineIndex + 1,
-                                        content: line.trim(), // Trim whitespace for conciseness
-                                        context: contextText,
-                                        matchCount: lineMatches.length,
-                                        startLine:
-                                            contextLines > 0
-                                                ? Math.max(0, lineIndex - contextLines) + 1
-                                                : undefined,
-                                        endLine:
-                                            contextLines > 0
-                                                ? Math.min(lines.length - 1, lineIndex + contextLines) + 1
-                                                : undefined,
-                                    });
-                                }
-                            });
-                        } catch (error) {
-                            console.error(`[MCP Tool: search-notes] Failed to read note ${note.name}:`, error);
-                            // Continue with other notes
-                        }
-                    }
-
-                    if (noteResults.matches.length > 0) {
-                        // Calculate total score for ranking
-                        const totalMatches = noteResults.matches.reduce(
-                            (sum, match) => sum + match.matchCount,
-                            0
-                        );
-                        noteResults.score = totalMatches;
-                        searchResults.push(noteResults);
-                    }
-                }
-
-                // Sort by relevance (score)
-                searchResults.sort((a, b) => b.score - a.score);
-
-                // Calculate pagination
-                const totalResults = searchResults.length;
-                const totalPages = Math.ceil(totalResults / maxResults);
-                const startIndex = (page - 1) * maxResults;
-                const endIndex = Math.min(startIndex + maxResults, totalResults);
-                const paginatedResults = searchResults.slice(startIndex, endIndex);
+                const { results: paginatedResults, totalResults, totalPages, startIndex } = outcome;
+                const searchSourceLabel = outcome.source === 'index' ? 'via full-text index' : 'via full scan';
+                const fallbackNotice =
+                    outcome.notice
+                        ? `Note: ${outcome.notice}\n`
+                        : '';
 
                 // Format results
                 if (totalResults === 0) {
@@ -505,13 +467,13 @@ export function configureMcpServerInstance(server: McpServer): void {
                                 type: 'text',
                                 text: `No matches found for "${query}" in ${
                                     searchType === 'both' ? 'titles or content' : searchType
-                                }.`,
+                                } (searched ${searchSourceLabel}).${outcome.notice ? ` Note: ${outcome.notice}` : ''}`,
                             },
                         ],
                     };
                 }
 
-                const totalMatches = searchResults.reduce((sum, result) => sum + result.score, 0);
+                const totalMatches = outcome.totalMatches;
 
                 let output = '';
                 let fallbackMessage = '';
@@ -522,9 +484,9 @@ export function configureMcpServerInstance(server: McpServer): void {
 
                 // Header with pagination info
                 if (concise) {
-                    output = `${fallbackMessage}SEARCH: "${query}" | Results: ${totalResults} notes, ${totalMatches} matches | Page ${page}/${totalPages}\n\n`;
+                    output = `${fallbackMessage}${fallbackNotice}SEARCH: "${query}" | Results: ${totalResults} notes, ${totalMatches} matches | Page ${page}/${totalPages} | ${searchSourceLabel}\n\n`;
                 } else {
-                    output = `${fallbackMessage}Found ${totalMatches} matches in ${totalResults} notes (showing page ${page} of ${totalPages}):\n\n`;
+                    output = `${fallbackMessage}${fallbackNotice}Found ${totalMatches} matches in ${totalResults} notes (showing page ${page} of ${totalPages}) | ${searchSourceLabel}:\n\n`;
                 }
 
                 // Results
@@ -549,6 +511,16 @@ export function configureMcpServerInstance(server: McpServer): void {
                                         ? match.content.substring(0, 97) + '...'
                                         : match.content;
                                 output += `  • L${match.line}: ${truncatedContent}\n`;
+                                if (contextLines > 0 && match.context) {
+                                    match.context
+                                        .split('\n')
+                                        .forEach((ctxLine: string, idx: number) => {
+                                            const actualLineNum = (match.startLine || 0) + idx;
+                                            // the match line is already printed above
+                                            if (actualLineNum === match.line) return;
+                                            output += `      ${actualLineNum}: ${ctxLine}\n`;
+                                        });
+                                }
                             }
                         });
 
@@ -804,6 +776,226 @@ export function configureMcpServerInstance(server: McpServer): void {
                             text: `Failed to delete note: ${
                                 error instanceof Error ? error.message : 'Unknown error'
                             }`,
+                        },
+                    ],
+                    isError: true,
+                };
+            }
+        }
+    );
+
+    // Tool: append content to a note
+    server.registerTool(
+        'append-note',
+        {
+            title: 'Append to Note',
+            description: 'Append content to the end of an existing note, or create a new note with the content',
+            inputSchema: {
+                filename: z
+                    .string()
+                    .describe('The filename of the note to append to (should end with .md)'),
+                content: z
+                    .string()
+                    .describe('The content to append to the note'),
+                separator: z
+                    .string()
+                    .optional()
+                    .default('\n\n')
+                    .describe('Separator between existing content and new content (default: two newlines)'),
+                createIfMissing: z
+                    .boolean()
+                    .optional()
+                    .default(true)
+                    .describe('Create the note if it does not exist (default: true)'),
+            },
+        },
+        async ({ filename, content, separator, createIfMissing }) => {
+            const result = await appendToNote(filename, content, {
+                separator,
+                createIfMissing,
+            });
+
+            return {
+                content: [
+                    {
+                        type: 'text',
+                        text: result.message,
+                    },
+                ],
+                isError: !result.success,
+            };
+        }
+    );
+
+    // Tool: get frontmatter value from a note
+    server.registerTool(
+        'frontmatter-get',
+        {
+            title: 'Get Frontmatter',
+            description: 'Get YAML frontmatter from a note. Returns entire frontmatter object or a specific field using dot notation.',
+            annotations: {
+                readOnlyHint: true,
+            },
+            inputSchema: {
+                filename: z
+                    .string()
+                    .describe('The filename of the note (should end with .md)'),
+                key: z
+                    .string()
+                    .optional()
+                    .describe('Optional key to retrieve (supports dot notation like "meta.author"). If omitted, returns entire frontmatter.'),
+            },
+        },
+        async ({ filename, key }) => {
+            try {
+                const content = await readNoteAPI(filename as string);
+                const value = getFrontmatterValue(content, key as string | undefined);
+
+                return {
+                    content: [
+                        {
+                            type: 'text',
+                            text: JSON.stringify(value, null, 2),
+                        },
+                    ],
+                };
+            } catch (error) {
+                return {
+                    content: [
+                        {
+                            type: 'text',
+                            text: `Failed to get frontmatter: ${error instanceof Error ? error.message : 'Unknown error'}`,
+                        },
+                    ],
+                    isError: true,
+                };
+            }
+        }
+    );
+
+    // Tool: set frontmatter value in a note
+    server.registerTool(
+        'frontmatter-set',
+        {
+            title: 'Set Frontmatter',
+            description: 'Set a YAML frontmatter field in a note. Creates frontmatter if none exists. Supports dot notation for nested fields.',
+            inputSchema: {
+                filename: z
+                    .string()
+                    .describe('The filename of the note (should end with .md)'),
+                key: z
+                    .string()
+                    .describe('The key to set (supports dot notation like "meta.author")'),
+                value: z
+                    .unknown()
+                    .describe('The value to set (can be string, number, boolean, array, or object)'),
+            },
+        },
+        async ({ filename, key, value }) => {
+            try {
+                const content = await readNoteAPI(filename as string);
+                const newContent = setFrontmatterValue(content, key as string, value);
+                await writeNoteAPI(filename as string, newContent);
+
+                return {
+                    content: [
+                        {
+                            type: 'text',
+                            text: `Successfully set ${key} in ${filename}`,
+                        },
+                    ],
+                };
+            } catch (error) {
+                return {
+                    content: [
+                        {
+                            type: 'text',
+                            text: `Failed to set frontmatter: ${error instanceof Error ? error.message : 'Unknown error'}`,
+                        },
+                    ],
+                    isError: true,
+                };
+            }
+        }
+    );
+
+    // Tool: query outgoing links from a note
+    server.registerTool(
+        'query-links',
+        {
+            title: 'Query Links',
+            description: 'Extract all outgoing wiki links from a note. Returns link targets, anchors, and aliases.',
+            inputSchema: {
+                filename: z
+                    .string()
+                    .describe('The filename of the note (should end with .md)'),
+            },
+        },
+        async ({ filename }) => {
+            try {
+                const content = await readNoteAPI(filename as string);
+                const links = extractLinks(content);
+
+                return {
+                    content: [
+                        {
+                            type: 'text',
+                            text: JSON.stringify({
+                                filename,
+                                linkCount: links.length,
+                                links,
+                            }, null, 2),
+                        },
+                    ],
+                };
+            } catch (error) {
+                return {
+                    content: [
+                        {
+                            type: 'text',
+                            text: `Failed to query links: ${error instanceof Error ? error.message : 'Unknown error'}`,
+                        },
+                    ],
+                    isError: true,
+                };
+            }
+        }
+    );
+
+    // Tool: query backlinks to a note
+    server.registerTool(
+        'query-backlinks',
+        {
+            title: 'Query Backlinks',
+            description: 'Find all notes that link to a specified note (backlinks).',
+            inputSchema: {
+                filename: z
+                    .string()
+                    .describe('The filename of the note to find backlinks for (should end with .md)'),
+            },
+        },
+        async ({ filename }) => {
+            try {
+                const backlinks = await findBacklinks(filename as string);
+
+                return {
+                    content: [
+                        {
+                            type: 'text',
+                            text: JSON.stringify({
+                                filename,
+                                backlinkCount: backlinks.length,
+                                backlinks,
+                            }, null, 2),
+                        },
+                    ],
+                };
+            } catch (error) {
+                return {
+                    content: [
+                        {
+                            type: 'text',
+                            text: `Failed to query backlinks: ${error instanceof Error ? error.message : 'Unknown error'}`,
                         },
                     ],
                     isError: true,
