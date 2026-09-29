@@ -230,8 +230,9 @@ async function extractLines(opts: {
     contextLines: number;
 }): Promise<SearchResult[]> {
     const { ctx, files, query, searchType, caseSensitive, concise, contextLines } = opts;
-    const regex = buildTermRegex(tokenize(query), caseSensitive);
-    const queryRegex = buildQueryRegex(query, caseSensitive);
+    // Line matching uses the SAME regex construction as scanSearch (full
+    // query with literal fallback) so both paths produce identical matches.
+    const regex = buildQueryRegex(query, caseSensitive);
     const listing = await ctx.listNotes();
     const perms = new Map(listing.map((n) => [n.name, (n.perm as 'ro' | 'rw') ?? 'rw']));
 
@@ -239,8 +240,7 @@ async function extractLines(opts: {
     for (const file of files) {
         const matches: NoteMatches[] = [];
         if (searchType === 'title' || searchType === 'both') {
-            // Title matching uses the full query regex (same as scan).
-            const titleMatches = Array.from(file.matchAll(queryRegex));
+            const titleMatches = Array.from(file.matchAll(regex));
             if (titleMatches.length > 0) {
                 matches.push({ type: 'title', line: 0, content: file, matchCount: titleMatches.length });
             }
@@ -250,10 +250,7 @@ async function extractLines(opts: {
                 const content = await ctx.readNote(file);
                 const lines = content.split('\n');
                 lines.forEach((line, lineIndex) => {
-                    // Line matching uses tokenized terms: the index matches
-                    // pages for any of the terms, so line extraction must too.
-                    const lineRegex = regex ?? queryRegex;
-                    const lineMatches = Array.from(line.matchAll(lineRegex));
+                    const lineMatches = Array.from(line.matchAll(regex));
                     if (lineMatches.length > 0) {
                         let contextText = '';
                         if (contextLines > 0) {
